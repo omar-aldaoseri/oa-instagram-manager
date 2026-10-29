@@ -1,0 +1,21 @@
+name: Token health check
+
+# Every Monday: confirms the Instagram token still works.
+# If it fails, GitHub emails you, so you can renew the token before posts are missed.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask Instagram who this token belongs to
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$IG_ACCESS_TOKEN" ]; then echo "IG_ACCESS_TOKEN secret is missing"; exit 1; fi
+          code=$(curl -s -o out.json -w "%{http_code}" "https://graph.instagram.com/v26.0/me?fields=user_id,username&access_token=$IG_ACCESS_TOKEN")
+          python3 -c "import json;d=json.load(open('out.json'));print('username:',d.get('username'),'| error:',d.get('error',{}).get('message'))"
+          test "$code" = "200"
