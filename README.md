@@ -25,8 +25,8 @@ Posts to Omar's OA Instagram account through the official Instagram API, and **o
 
 ## Secrets (Settings → Secrets and variables → Actions)
 
-- `IG_ACCESS_TOKEN`: long-lived Instagram user access token (Instagram Login, `instagram_business_basic` and `instagram_business_content_publish`).
-- `IG_USER_ID` (optional): the Instagram account ID. If empty, it is looked up from the token.
+- `IG_ACCESS_TOKEN`: long-lived access token. Either an Instagram Login token (starts with `IG`) or a Facebook Login token (starts with `EAA`, needs `instagram_basic`, `instagram_content_publish`, `pages_show_list`, `pages_read_engagement`, `business_management`). The script picks the right API host from the token.
+- `IG_USER_ID` (optional): the Instagram professional account ID. If empty, it is looked up from the token (for Facebook Login, from the one Facebook Page linked to Instagram).
 
 The **Token health check** workflow runs every Monday and fails, with a GitHub email, if the token stops working. Long-lived tokens expire, so renew it when that happens.
 

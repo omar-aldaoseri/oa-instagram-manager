@@ -29,7 +29,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-API = "https://graph.instagram.com/v26.0"
+IG_HOST = "https://graph.instagram.com/v26.0"   # Instagram Login tokens (start with IG)
+FB_HOST = "https://graph.facebook.com/v26.0"    # Facebook Login tokens (start with EAA)
 ROOT = Path(__file__).resolve().parent.parent
 QUEUE = ROOT / "queue"
 MAX_LATE_HOURS = 6
@@ -75,10 +76,25 @@ def image_url(rel):
 class Api:
     def __init__(self, token):
         self.token = token
+        self.base = IG_HOST if token.startswith("IG") else FB_HOST
+
+    def find_ig_id(self):
+        """Look up the Instagram professional account ID for this token."""
+        if self.base == IG_HOST:
+            return str(self.call("GET", "me", {"fields": "user_id"})["user_id"])
+        pages = self.call("GET", "me/accounts", {"fields": "name,instagram_business_account"}).get("data", [])
+        linked = [p for p in pages if p.get("instagram_business_account")]
+        if len(linked) != 1:
+            names = ", ".join(p.get("name", "?") for p in linked) or "none"
+            raise RuntimeError(f"Expected exactly one Facebook Page linked to Instagram, found: {names}. Set the IG_USER_ID secret.")
+        return linked[0]["instagram_business_account"]["id"]
+
+    def whoami(self, ig_id):
+        return self.call("GET", ig_id, {"fields": "username"}).get("username")
 
     def call(self, method, path, params=None):
         params = dict(params or {})
-        url = f"{API}/{path}"
+        url = f"{self.base}/{path}"
         data = None
         if method == "GET":
             params["access_token"] = self.token
@@ -156,12 +172,11 @@ def main():
         log("IG_ACCESS_TOKEN secret is missing.")
         return 1
     api = Api(token)
-    ig_id = os.environ.get("IG_USER_ID", "").strip() or str(api.call("GET", "me", {"fields": "user_id"})["user_id"])
+    ig_id = os.environ.get("IG_USER_ID", "").strip() or api.find_ig_id()
 
     if dry:
-        me = api.call("GET", "me", {"fields": "user_id,username"})
         lim = api.call("GET", f"{ig_id}/content_publishing_limit", {"fields": "quota_usage,config"})
-        log(f"Token OK for @{me.get('username')}. Publishing limit: {json.dumps(lim)}")
+        log(f"Token OK for @{api.whoami(ig_id)} (account {ig_id}, via {api.base}). Publishing limit: {json.dumps(lim)}")
 
     now = now_utc()
     failures = 0

@@ -11,11 +11,20 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Ask Instagram who this token belongs to
+      - uses: actions/checkout@v4
+      - name: Ask Instagram which account this token belongs to
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
         run: |
-          if [ -z "$IG_ACCESS_TOKEN" ]; then echo "IG_ACCESS_TOKEN secret is missing"; exit 1; fi
-          code=$(curl -s -o out.json -w "%{http_code}" "https://graph.instagram.com/v26.0/me?fields=user_id,username&access_token=$IG_ACCESS_TOKEN")
-          python3 -c "import json;d=json.load(open('out.json'));print('username:',d.get('username'),'| error:',d.get('error',{}).get('message'))"
-          test "$code" = "200"
+          python3 - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from publish import Api
+          tok = os.environ.get("IG_ACCESS_TOKEN", "").strip()
+          if not tok:
+              sys.exit("IG_ACCESS_TOKEN secret is missing")
+          api = Api(tok)
+          ig = os.environ.get("IG_USER_ID", "").strip() or api.find_ig_id()
+          print(f"Token works for @{api.whoami(ig)} (account {ig}) via {api.base}")
+          EOF
