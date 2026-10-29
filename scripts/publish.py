@@ -5,8 +5,10 @@ Runs inside GitHub Actions. For every file in queue/*.json it checks:
   1. status is "approved" (Claude sets this only after Omar says yes in chat)
   2. publish_at has arrived, and is less than MAX_LATE_HOURS old
   3. the caption and images still match the fingerprint taken at approval
-Then it publishes through the official Instagram API (Instagram Login,
-graph.instagram.com) and records the result back into the queue file.
+Then it publishes to every platform listed in the item ("instagram",
+"facebook") through Meta's official APIs and records each result back
+into the queue file. Each platform is tracked on its own, so one that
+already succeeded is never posted again.
 
 Safety rules built in:
   - A file named PAUSE in the repo root stops every post.
@@ -50,6 +52,8 @@ def now_utc():
 def fingerprint(item, root=ROOT):
     h = hashlib.sha256()
     h.update(item["caption"].encode("utf-8"))
+    if "platforms" in item:
+        h.update(("\x00platforms:" + "|".join(item["platforms"])).encode("utf-8"))
     for rel in item["images"]:
         h.update(b"\x00" + rel.encode("utf-8") + b"\x00")
         h.update((root / rel).read_bytes())
@@ -89,6 +93,18 @@ class Api:
             raise RuntimeError(f"Expected exactly one Facebook Page linked to Instagram, found: {names}. Set the IG_USER_ID secret.")
         return linked[0]["instagram_business_account"]["id"]
 
+    def find_page(self):
+        """The Facebook Page linked to Instagram, with its Page access token."""
+        pages = self.call("GET", "me/accounts", {"fields": "id,name,access_token,instagram_business_account"}).get("data", [])
+        linked = [p for p in pages if p.get("instagram_business_account")]
+        if len(linked) != 1:
+            raise RuntimeError("Expected exactly one Facebook Page linked to Instagram for Facebook posting.")
+        return linked[0]
+
+    def granted(self):
+        perms = self.call("GET", "me/permissions").get("data", [])
+        return sorted(p["permission"] for p in perms if p.get("status") == "granted")
+
     def whoami(self, ig_id):
         return self.call("GET", ig_id, {"fields": "username"}).get("username")
 
@@ -108,7 +124,7 @@ class Api:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
-            raise RuntimeError(f"Instagram API {e.code} on {path}: {body}") from None
+            raise RuntimeError(f"Meta API {e.code} on {path}: {body}") from None
 
     def wait_ready(self, container_id):
         for _ in range(POLL_TRIES):
@@ -162,6 +178,19 @@ def publish(api, ig_id, item):
     return api.call("POST", f"{ig_id}/media_publish", {"creation_id": cid})["id"]
 
 
+def publish_facebook(page_api, page_id, item):
+    """Post to the Facebook Page. One image: a photo post. Several: one multi-photo post."""
+    urls = [image_url(r) for r in item["images"]]
+    if len(urls) == 1:
+        r = page_api.call("POST", f"{page_id}/photos", {"url": urls[0], "message": item["caption"], "published": "true"})
+        return r.get("post_id") or r["id"]
+    ids = [page_api.call("POST", f"{page_id}/photos", {"url": u, "published": "false"})["id"] for u in urls]
+    params = {"message": item["caption"]}
+    for i, fid in enumerate(ids):
+        params[f"attached_media[{i}]"] = json.dumps({"media_fbid": fid})
+    return page_api.call("POST", f"{page_id}/feed", params)["id"]
+
+
 def main():
     dry = os.environ.get("DRY_RUN", "false").lower() == "true"
     if (ROOT / "PAUSE").exists():
@@ -174,9 +203,23 @@ def main():
     api = Api(token)
     ig_id = os.environ.get("IG_USER_ID", "").strip() or api.find_ig_id()
 
+    page = {"cache": None}
+
+    def page_api():
+        if page["cache"] is None:
+            pg = api.find_page()
+            page["cache"] = (Api(pg["access_token"]), pg["id"], pg.get("name"))
+        return page["cache"]
+
     if dry:
         lim = api.call("GET", f"{ig_id}/content_publishing_limit", {"fields": "quota_usage,config"})
         log(f"Token OK for @{api.whoami(ig_id)} (account {ig_id}, via {api.base}). Publishing limit: {json.dumps(lim)}")
+        if api.base == FB_HOST:
+            perms = api.granted()
+            _, pid, pname = page_api()
+            ok = "pages_manage_posts" in perms
+            log(f"Facebook Page: {pname} ({pid}). Facebook posting {'ready' if ok else 'NOT ready: pages_manage_posts missing from token'}.")
+            log(f"Granted permissions: {', '.join(perms)}")
 
     now = now_utc()
     failures = 0
@@ -215,19 +258,33 @@ def main():
         item["status"] = "publishing"
         item["publishing_started"] = now.isoformat()
         save_and_push(path, item, f"publishing: {name}")
-        try:
-            media_id = publish(api, ig_id, item)
-            item["status"] = "posted"
-            item["ig_media_id"] = media_id
-            item["posted_at"] = now_utc().isoformat()
-            save_and_push(path, item, f"posted: {name}")
-            log(f"{name}: posted, media id {media_id}.")
-        except Exception as e:  # keep going with the rest of the queue
-            item["status"] = "failed"
-            item["note"] = str(e)[:500]
-            save_and_push(path, item, f"failed: {name}")
-            log(f"{name}: FAILED: {e}")
+        results = item.setdefault("results", {})
+        errors = {}
+        for platform in item.get("platforms", ["instagram"]):
+            if platform in results:
+                continue  # already out on this platform, never post twice
+            try:
+                if platform == "instagram":
+                    pid = publish(api, ig_id, item)
+                    item["ig_media_id"] = pid
+                elif platform == "facebook":
+                    papi, page_id, _ = page_api()
+                    pid = publish_facebook(papi, page_id, item)
+                else:
+                    raise ValueError(f"unknown platform {platform}")
+                results[platform] = {"id": pid, "posted_at": now_utc().isoformat()}
+                log(f"{name}: posted to {platform}, id {pid}.")
+            except Exception as e:  # keep going with the other platforms and posts
+                errors[platform] = str(e)[:400]
+                log(f"{name}: {platform} FAILED: {e}")
+        if errors:
+            item["status"] = "partial" if results else "failed"
+            item["note"] = "; ".join(f"{k}: {v}" for k, v in errors.items())
             failures += 1
+        else:
+            item["status"] = "posted"
+            item["posted_at"] = now_utc().isoformat()
+        save_and_push(path, item, f"{item['status']}: {name}")
     return 1 if failures else 0
 
 

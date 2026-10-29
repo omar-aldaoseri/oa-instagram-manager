@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--at", required=True, help="ISO time with offset, e.g. 2026-10-30T19:00:00+03:00")
     ap.add_argument("--caption-file", required=True)
     ap.add_argument("--images", nargs="+", required=True)
+    ap.add_argument("--platforms", nargs="+", default=["instagram", "facebook"], choices=["instagram", "facebook"])
     ap.add_argument("--approved-by", default="Omar, in chat")
     a = ap.parse_args()
 
@@ -40,6 +41,7 @@ def main():
         "publish_at": at.isoformat(),
         "type": "IMAGE" if len(a.images) == 1 else "CAROUSEL",
         "images": a.images,
+        "platforms": a.platforms,
         "caption": Path(a.caption_file).read_text(encoding="utf-8").strip(),
         "status": "approved",
         "approved_by": a.approved_by,
